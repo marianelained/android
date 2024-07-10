@@ -1,0 +1,878 @@
+package com.example.biogassimulation;
+
+import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothSocket;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
+import android.os.CountDownTimer;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.util.Log;
+import android.view.animation.Animation;
+import android.view.animation.AnimationUtils;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import com.google.android.material.snackbar.Snackbar;
+
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+public class bttesttwo extends AppCompatActivity {
+
+    public static final String EXTRA_DEVICE_ADDRESS = "98:DA:50:02:F1:99";
+    private static final UUID MY_UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
+    private BluetoothAdapter mBluetoothAdapter;
+    private BluetoothDevice mDevice;
+    private OutputStream mOutputStream;
+
+
+    private BluetoothSocket mSocket;
+    private ConnectThread mConnectThread;
+    private ConnectedThread mConnectedThread;
+
+    private TextView mConnectionStatusTextView;
+    private TextView mTempInputTextView;
+    private static final int REQUEST_BLUETOOTH_PERMISSIONS = 1;
+    private static final int REQUEST_ENABLE_BT = 1;
+
+    // Declare UI elements
+    private CountDownTimer countDownTimer;
+    // Declare a variable to store the remaining time in milliseconds
+    private long remainingTimeInMillis;
+    private EditText biogasInput;
+    private EditText remainingGasInput;
+    private TextView countdownTimer;
+    private ImageView pulsingImage;
+    private Animation pulseAnimation;
+    private static final String TAG = "bttesttwo";
+    private double biogasProductionPerHour;
+    // Declare a boolean flag to track if the timer is running
+    private boolean isTimerRunning = false;
+    private boolean shouldReadTemperature = true;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_bttesttwo);
+
+
+        // Retrieve the Bluetooth device address from the intent
+        String deviceAddress = getIntent().getStringExtra(EXTRA_DEVICE_ADDRESS);
+        if (deviceAddress == null) {
+            // Handle null address, show an error message or take appropriate action
+            Toast.makeText(this, "Bluetooth device address is null", Toast.LENGTH_SHORT).show();
+            // Finish the activity or handle it in another way
+            finish(); // Example: This will finish the activity if the address is null
+            return;
+        }
+
+        // Initialize Bluetooth adapter
+        mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (mBluetoothAdapter == null) {
+            // Device does not support Bluetooth
+            Snackbar.make(findViewById(android.R.id.content), "Device does not support Bluetooth", Snackbar.LENGTH_SHORT).show();
+            finish(); // Finish the activity
+            return;
+        }
+        // Get the Bluetooth device object from the address
+        mDevice = mBluetoothAdapter.getRemoteDevice(deviceAddress);
+
+        // Start the connection process
+        mConnectThread = new bttesttwo.ConnectThread();
+        mConnectThread.start();
+
+        biogasInput = findViewById(R.id.initialGasINPUT);
+        remainingGasInput = findViewById(R.id.remainingGasINPUT);
+        mTempInputTextView = findViewById(R.id.ConsumptionINPUT);
+        countdownTimer = findViewById(R.id.countdownTimer);
+        pulsingImage = findViewById(R.id.pulsingImageView);
+
+
+        // Instantiate LoadDataFromExcelTask and execute it
+        LoadDataFromExcelTask loadDataFromExcelTask = new LoadDataFromExcelTask(this, biogasInput);
+        loadDataFromExcelTask.execute();
+
+        // Load animation
+        pulseAnimation = AnimationUtils.loadAnimation(this, R.anim.pulsing_animation);
+
+        findViewById(R.id.eSimulate2).setOnClickListener(v -> {
+            connectToArduino(deviceAddress);
+            // Pause potentiometer reading
+            mConnectedThread.setSendPotentiometerData(false);
+
+            // Send command to Arduino
+            sendDataToArduino("2,200000");
+
+            // Enable stop button if needed
+            findViewById(R.id.stopButton).setEnabled(true);
+            connectToArduino(deviceAddress);
+
+            // Pause for 1 second before resuming potentiometer reading
+            new Handler().postDelayed(() -> {
+                // Resume potentiometer reading
+                mConnectedThread.setSendPotentiometerData(true);
+
+                // Check if the timer is not running
+                if (!isTimerRunning) {
+                    // Disable the simulate button
+                    v.setEnabled(false);
+
+                    // Start biogas production simulation
+                    startBiogasProductionSimulation();
+
+                    // Show a notification that data is saved
+                    Toast.makeText(this, "Data saved.", Toast.LENGTH_SHORT).show();
+                }
+            }, 3000); // 1000 milliseconds = 1 second
+        });
+
+
+        findViewById(R.id.resultExit).setOnClickListener(v -> {
+            // Navigate back to the main activity
+            startActivity(new Intent(bttesttwo.this, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK));
+            finish(); // Finish the current activity
+        });
+
+        findViewById(R.id.resultNew).setOnClickListener(v -> {
+            // Build an AlertDialog with three choices
+            new AlertDialog.Builder(bttesttwo.this)
+                    .setTitle("Select Waste Type")
+                    .setItems(new String[]{"Livestock Waste", "Food Waste", "Mix"}, (dialog, which) -> {
+                        // Handle the selection based on the selected item index
+                        switch (which) {
+                            case 0:
+                                // Livestock Waste selected
+                                startActivity(new Intent(bttesttwo.this, Livestock.class));
+                                finish(); // Finish the current activity
+                                break;
+                            case 1:
+                                // Food Waste selected
+                                startActivity(new Intent(bttesttwo.this, Food.class));
+                                finish(); // Finish the current activity
+                                break;
+                            case 2:
+                                // Mix selected
+                                startActivity(new Intent(bttesttwo.this, Mixed.class));
+                                finish(); // Finish the current activity
+                                break;
+                        }
+                        dialog.dismiss(); // Dismiss the dialog
+                    })
+                    .create()
+                    .show(); // Show the AlertDialog
+        });
+
+        // Monitor changes in the text field
+        mTempInputTextView.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                adjustImageSize(s.toString());
+            }
+        });
+
+        //Exit
+        findViewById(R.id.resultExit).setOnClickListener(v -> {
+            // Navigate back to the main activity
+            startActivity(new Intent(bttesttwo.this, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK));
+            stopCountdownTimer();
+            stopSimulation();
+            finish();
+        });
+
+
+        findViewById(R.id.resultNew).setOnClickListener(v -> {
+            // Build an AlertDialog with three choices
+            new AlertDialog.Builder(bttesttwo.this)
+                    .setTitle("Select Waste Type")
+                    .setItems(new String[]{"Livestock Waste", "Food Waste", "Mix"}, (dialog, which) -> {
+                        // Handle the selection based on the selected item index
+                        switch (which) {
+                            case 0:
+                                // Livestock Waste selected
+                                startActivity(new Intent(bttesttwo.this, Livestock.class));
+                                finish(); // Finish the current activity
+                                // Handle accordingly
+                                break;
+                            case 1:
+                                // Food Waste selected
+                                startActivity(new Intent(bttesttwo.this, Food.class));
+                                finish(); // Finish the current activity
+
+                                break;
+                            case 2:
+                                // Mix selected
+                                startActivity(new Intent(bttesttwo.this, Mixed.class));
+                                finish(); // Finish the current activity
+                                break;
+                        }
+                        dialog.dismiss(); // Dismiss the dialog
+                    })
+                    .create()
+                    .show(); // Show the AlertDialog
+        });
+
+        // Button click listener to stop reading the potentiometer
+        findViewById(R.id.stopButton).setOnClickListener(v -> {
+            if (mConnectedThread != null) {
+                mConnectedThread.write("4,\n".getBytes());
+            }
+            stopSimulation();
+            stopCountdownTimer();
+
+        });
+
+        // Button click listener to stop the countdown timer and animation
+        findViewById(R.id.selectButton).setOnClickListener(v -> {
+            long delayBetweenOperations = 500; // 0.5 second delay (adjust as needed)
+
+            // Send data to Arduino after a delay
+            new Handler().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    connectToArduino(deviceAddress);
+                }
+            }, delayBetweenOperations*2);
+        });
+
+    }
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_BLUETOOTH_PERMISSIONS) {
+            // Check if all permissions are granted
+            boolean allPermissionsGranted = true;
+            for (int result : grantResults) {
+                if (result != PackageManager.PERMISSION_GRANTED) {
+                    allPermissionsGranted = false;
+                    break;
+                }
+            }
+            if (allPermissionsGranted) {
+                // All permissions granted, proceed with establishing the Bluetooth connection
+                // Call the ConnectThread to retry establishing the connection
+                mConnectThread.run();
+            } else {
+                // Permission denied by user, display a message or handle the denial appropriately
+                Toast.makeText(this, "Bluetooth permissions denied", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    // Method to stop the countdown timer and animation
+    private void stopSimulation() {
+        stopCountdownTimer(); // Stop the countdown timer
+        pulsingImage.clearAnimation(); // Stop animation
+        isTimerRunning = false; // Set timer running flag to false
+
+        // Reset countdown timer display to zero and disable it
+        countdownTimer.setText("00:00:00");
+        countdownTimer.setEnabled(false);
+
+        // Enable the simulate button
+        findViewById(R.id.eSimulate2).setEnabled(true);
+
+        // Create a Handler to introduce a delay
+        new Handler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // Send data to Arduino to start reading potentiometer
+                sendDataToArduino("2,200000");
+            }
+        }, 2000); // 1-second delay
+    }
+
+    private void adjustImageSize(String value) {
+        float floatValue = Float.parseFloat(value);
+        float defaultScale = 1.0f;
+
+        if (floatValue == 0.226f) {
+            // Make the image default size
+            float scaleFactor = 0.8f; // 50% of the default size
+            pulsingImage.setScaleX(defaultScale * scaleFactor);
+            pulsingImage.setScaleY(defaultScale * scaleFactor);
+        } else if (floatValue == 0.28f) {
+            float scaleFactor = 1f;
+            pulsingImage.setScaleX(defaultScale * scaleFactor);
+            pulsingImage.setScaleY(defaultScale * scaleFactor);
+        } else if (floatValue == 0.42f) {
+            float scaleFactor = 1.3f;
+            pulsingImage.setScaleX(defaultScale * scaleFactor);
+            pulsingImage.setScaleY(defaultScale * scaleFactor);
+        }
+    }
+
+
+    private double initialRemainingBiogas;
+
+    // Method to start biogas production simulation
+    private void startBiogasProductionSimulation() {
+
+        try {
+            // Get user input from EditText fields
+            String biogasProductionStr = biogasInput.getText().toString();
+            String gasThresholdStr = mTempInputTextView.getText().toString();
+
+            // Check if the input fields are empty
+            if (biogasProductionStr.isEmpty() || gasThresholdStr.isEmpty()) {
+                Toast.makeText(this, "Please enter valid input values", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            // Convert daily biogas production to cubic meters per day
+            double biogasProductionPerDay = Double.parseDouble(biogasProductionStr);
+
+            // Calculate the consumption rate per hour based on user input
+            double gasConsumptionRatePerHour = Double.parseDouble(gasThresholdStr);
+
+            // Check for division by zero
+            if (gasConsumptionRatePerHour <= 0) {
+                Toast.makeText(this, "Gas threshold must be greater than zero", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            // Calculate the initial remaining biogas in cubic meters
+            initialRemainingBiogas = biogasProductionPerDay;
+
+            // Calculate the duration in hours to consume the biogas
+            double durationInHours = initialRemainingBiogas / gasConsumptionRatePerHour;
+
+            // Convert the duration from hours to milliseconds
+            long durationInMillis = (long) (durationInHours * 3600 * 1000);
+
+// Start countdown timer after 1-second delay
+            new Handler().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    // Send command "4" to Arduino
+                    sendDataToArduino("4");
+                    // Send command "4" to Arduino
+                    sendDataToArduino("4");                    // Send command "4" to Arduino
+                    sendDataToArduino("4");
+
+                    // Introduce a 1-second delay before starting the countdown timer
+                    new Handler().postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            // Start countdown timer with calculated duration and gas consumption rate
+                            startCountdownTimer(durationInMillis / 60, gasConsumptionRatePerHour);
+                        }
+                    }, 1000); // 1-second delay before starting countdown timer
+                }
+            }, 1000); // 1-second delay before sending "4" command to Arduino
+
+
+        } catch (NumberFormatException e) {
+            // Handle invalid input
+            e.printStackTrace();
+            // Inform the user about the error
+            Toast.makeText(this, "Invalid input", Toast.LENGTH_SHORT).show();
+        }
+
+    }
+
+    // Method to start the countdown timer
+    private void startCountdownTimer(long durationInMillis, double gasConsumptionRatePerHour) {
+        if (!isTimerRunning) {
+            // Disable the simulate button
+            findViewById(R.id.eSimulate2).setEnabled(false);
+            findViewById(R.id.stopButton).setEnabled(true);
+
+            // Flag to check if it's the first tick
+            final boolean[] isFirstTick = {true};
+
+            // Create a new countdown timer
+            countDownTimer = new CountDownTimer(durationInMillis, 1000) {
+                public void onTick(long millisUntilFinished) {
+
+                    // Calculate the remaining biogas based on elapsed time
+                    double elapsedTimeInSeconds = (durationInMillis - millisUntilFinished) / 1000.0;
+                    double updatedBiogas = initialRemainingBiogas - gasConsumptionRatePerHour * (elapsedTimeInSeconds / 3600.0);
+
+                    // Ensure the updated biogas value doesn't become negative
+                    updatedBiogas = Math.max(updatedBiogas, 0);
+
+                    // Update the text of the EditText with the updated remaining biogas value
+                    remainingGasInput.setText(String.format(Locale.getDefault(), "%.4f", updatedBiogas));
+
+                    // Format remaining time as HH:mm:ss
+                    int hours = (int) (millisUntilFinished / (1000 * 60 * 60));
+                    int minutes = (int) ((millisUntilFinished % (1000 * 60 * 60)) / (1000 * 60));
+                    int seconds = (int) ((millisUntilFinished % (1000 * 60)) / 1000);
+                    String formattedTime = String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds);
+
+                    // Update the countdown timer TextView with the formatted time
+                    countdownTimer.setText(formattedTime);
+
+                    // Start animation only if the timer is running
+                    if (isTimerRunning) {
+                        pulsingImage.startAnimation(pulseAnimation);
+                    }
+                    // Write data to Excel on the first tick
+                    if (isFirstTick[0]) {
+                        writeDataToExcel("formula.xls");
+                        isFirstTick[0] = false; // Set the flag to false after the first tick
+                    }
+                    sendDataToArduino("4,0");
+
+                }
+
+
+
+                public void onFinish() {
+                    // Stop animation when timer finishes
+                    pulsingImage.clearAnimation();
+
+                    // Set timer running flag to false
+                    isTimerRunning = false;
+
+                    // Reset the countdown timer display to zero
+                    countdownTimer.setText("00:00:00");
+
+                    // Enable and disable buttons
+                    findViewById(R.id.eSimulate2).setEnabled(true);
+                    findViewById(R.id.stopButton).setEnabled(false);
+
+                    // Introduce a delay before sending data to Arduino
+                    new Handler().postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            // Send data to Arduino to stop reading potentiometer
+                            sendDataToArduino("2,200000");
+
+                            // Introduce another delay if needed before sending the next data
+                            new Handler().postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    // Send data to Arduino to perform another action
+                                    sendDataToArduino("3");
+                                }
+                            }, 1000); // 1 second delay if needed
+                        }
+                    }, 1500); // 1.5 second delay before sending "2" to Arduino
+                }
+            }.start();
+
+            // Set the timer running flag to true
+            isTimerRunning = true;
+        }
+    }
+
+
+
+
+    // Method to stop the countdown timer
+    private void stopCountdownTimer() {
+        long delayBetweenOperations = 500; // 0.5 second delay (adjust as needed)
+
+        // Send data to Arduino to start reading potentiometer
+        sendDataToArduino("2,200000");
+
+        // Connect to Arduino after a delay
+        new Handler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // Stop the countdown timer
+                if (countDownTimer != null) {
+                    countDownTimer.cancel(); // Cancel the countdown timer if it's running
+                    countDownTimer = null; // Set the reference to null
+                }
+                isTimerRunning = false;
+                countdownTimer.setText("00:00:00"); // Reset the countdown timer display to zero
+
+                // Enable and disable buttons
+                findViewById(R.id.eSimulate2).setEnabled(true);
+                findViewById(R.id.stopButton).setEnabled(false);
+            }
+        }, delayBetweenOperations * 2); // Adjust delay as needed
+    }
+
+
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // Close the Bluetooth socket when the activity is destroyed
+        if (mSocket != null) {
+            try {
+                mSocket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        stopCountdownTimer();
+        stopSimulation();
+        finish();
+    }
+
+    private void connectToArduino(String deviceAddress) {
+        if (mBluetoothAdapter == null) {
+            // Handle the case where BluetoothAdapter is null
+            Log.e(TAG, "BluetoothAdapter is null");
+            return;
+        }
+
+        // Get the BluetoothDevice object corresponding to the given address
+        BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceAddress);
+        if (device == null) {
+            // Handle the case where the device is null
+            Log.e(TAG, "Bluetooth device is null");
+            return;
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.BLUETOOTH, Manifest.permission.BLUETOOTH_ADMIN},
+                    REQUEST_BLUETOOTH_PERMISSIONS);
+            return;
+        }
+
+        try {
+            mSocket = device.createRfcommSocketToServiceRecord(MY_UUID);
+            mSocket.connect();
+            mOutputStream = mSocket.getOutputStream();
+        } catch (IOException e) {
+            // Handle connection errors
+            e.printStackTrace();
+        }
+    }
+    private void sendDataToArduino(String data) {
+        try {
+            if ((mOutputStream != null) || !mBluetoothAdapter.isEnabled()){
+                mOutputStream.write(data.getBytes());
+                Log.d(TAG, "Data sent to Arduino: " + data); // Add this log statement
+                // You can also display a toast message to indicate that data is sent
+//                Toast.makeText(this, "Data sent to Arduino: " + data, Toast.LENGTH_SHORT).show();
+                return;
+            } else {
+                Log.e(TAG, "Bluetooth socket is not connected");
+                // Attempt to reconnect or notify the user
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to send data to Arduino", e);
+            // Handle reconnection logic or notify the user
+        }
+    }
+
+
+
+// Connecting with Arduino
+    class ConnectThread extends Thread {
+        @Override
+        public void run() {
+            // Check if Bluetooth is enabled
+            if (!mBluetoothAdapter.isEnabled()) {
+                // Bluetooth is not enabled, prompt the user to enable it
+                Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+                startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT);
+                return;
+            }
+
+            // Check for Bluetooth permissions
+            if (ContextCompat.checkSelfPermission(bttesttwo.this,
+                    Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(bttesttwo.this,
+                            Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED) {
+
+                // Request Bluetooth permissions
+                ActivityCompat.requestPermissions(bttesttwo.this,
+                        new String[]{Manifest.permission.BLUETOOTH,
+                                Manifest.permission.BLUETOOTH_ADMIN},
+                        REQUEST_BLUETOOTH_PERMISSIONS);
+
+                // No need to proceed further as permissions are not granted yet
+                return;
+            }
+
+            // Permissions are granted, proceed with establishing the Bluetooth connection
+            try {
+                mSocket = mDevice.createRfcommSocketToServiceRecord(MY_UUID);
+                mSocket.connect();
+                mConnectedThread = new ConnectedThread(mSocket);
+                mConnectedThread.start();
+            } catch (IOException e) {
+                e.printStackTrace();
+                // Connection failed, retry the connection
+                run();
+            }
+        }
+
+    }
+
+    class ConnectedThread extends Thread {
+        private final BluetoothSocket mmSocket;
+        private final InputStream mmInStream;
+        private final OutputStream mmOutStream;
+        private final BlockingQueue<byte[]> writeQueue = new LinkedBlockingQueue<>();
+        private boolean sendPotentiometerData = true; // Flag to control sending potentiometer data
+
+        public ConnectedThread(BluetoothSocket socket) {
+            mmSocket = socket;
+            InputStream tmpIn = null;
+            OutputStream tmpOut = null;
+
+            try {
+                tmpIn = socket.getInputStream();
+                tmpOut = socket.getOutputStream();
+            } catch (IOException e) {
+                Log.e(TAG, "Error occurred when creating input/output stream", e);
+            }
+
+            mmInStream = tmpIn;
+            mmOutStream = tmpOut;
+        }
+
+        public void write(byte[] bytes) {
+            try {
+                writeQueue.put(bytes);
+            } catch (InterruptedException e) {
+                Log.e(TAG, "Error occurred when putting data in writeQueue", e);
+            }
+        }
+        // Method to control sending potentiometer data
+        public void setSendPotentiometerData(boolean send) {
+            sendPotentiometerData = send;
+        }
+
+        public void run() {
+            byte[] buffer = new byte[1024];
+            int bytes;
+
+            while (true) {
+                try {
+                    // Read from the InputStream
+                    if (mmInStream.available() > 0) {
+                        bytes = mmInStream.read(buffer);
+                        String receivedMessage = new String(buffer, 0, bytes);
+                        Log.d(TAG, "Received message: " + receivedMessage);
+
+                        // Process the received message
+                        if (receivedMessage.startsWith("Temperature:")) {
+                            String temperatureString = receivedMessage.substring(receivedMessage.indexOf(":") + 1).trim();
+                            Log.d(TAG, "Parsed temperature string: " + temperatureString);
+
+                            try {
+                                int temperature = Integer.parseInt(temperatureString);
+                                Log.d(TAG, "Parsed temperature integer: " + temperature);
+
+                                int translatedTemperature;
+                                if (temperature >= 0 && temperature <= 23) {
+                                    translatedTemperature = 226; // Scaled by 1000
+                                } else if (temperature >= 24 && temperature <= 29) {
+                                    translatedTemperature = 280; // Scaled by 1000
+                                } else if (temperature >= 30 && temperature <= 37) {
+                                    translatedTemperature = 420; // Scaled by 1000
+                                } else {
+                                    Log.e(TAG, "Temperature out of range");
+                                    translatedTemperature = -1;
+                                }
+
+                                mHandler.obtainMessage(1, translatedTemperature, -1).sendToTarget();
+
+                            } catch (NumberFormatException e) {
+                                Log.e(TAG, "Error parsing temperature value: " + temperatureString);
+                            }
+                        }
+                    }
+
+                    // Write data to the OutputStream
+                    byte[] dataToWrite = writeQueue.poll(10, TimeUnit.MILLISECONDS);
+                    if (dataToWrite != null) {
+                        mmOutStream.write(dataToWrite);
+                        mmOutStream.flush();
+                        Log.d(TAG, "Data sent to Arduino: " + new String(dataToWrite));
+                    }
+
+                } catch (IOException | InterruptedException e) {
+                    Log.e(TAG, "Error occurred in run method", e);
+                    break;
+                }
+            }
+        }
+    }
+
+
+    private void updateTemperatureUI(String temperatureString) {
+        try {
+            // Update the TempInput EditText with the temperature value
+            mTempInputTextView.post(() -> mTempInputTextView.setText(temperatureString));
+        } catch (NumberFormatException e) {
+            Log.e("Fetch Temperature", "Error parsing temperature value: " + temperatureString);
+        }
+    }
+
+    private final Handler mHandler = new Handler(Looper.getMainLooper()) {
+        @Override
+        public void handleMessage(@NonNull Message msg) {
+            switch (msg.what) {
+                case 0:
+                    // Handle incoming messages from the ConnectedThread
+                    int numBytes = msg.arg1;
+                    byte[] buffer = (byte[]) msg.obj;
+                    String receivedMessage = new String(buffer, 0, numBytes);
+                    Log.d("Received Data", "Received message: " + receivedMessage);
+                    // Check if the received message contains temperature value
+                    if (receivedMessage.startsWith("Temperature:")) {
+                        // Extract the temperature value from the message
+                        String temperatureString = receivedMessage.substring(receivedMessage.indexOf(":") + 1).trim(); // Extract after ":"
+                        Log.d("Received Data", "Parsed temperature string: " + temperatureString);
+                        try {
+                            // Parse the temperature value as a double
+                            double temperature = Double.parseDouble(temperatureString);
+                            Log.d("Received Data", "Parsed temperature double: " + temperature);
+                            // Update the UI with the temperature value
+                            updateTemperatureUI(String.valueOf(temperature));
+                        } catch (NumberFormatException e) {
+                            Log.e("Fetch Temperature", "Error parsing temperature value: " + temperatureString);
+                        }
+                    }
+                    break;
+                case 1:
+                    // Handle temperature data received from the ConnectedThread
+                    int temperatureValue = msg.arg1;
+                    // Convert the integer temperature value to double
+                    double temperatureDouble = temperatureValue / 1000.0; // Assuming temperatureValue was scaled by 1000
+                    // Update the UI with the temperature value
+                    mTempInputTextView.setText(String.valueOf(temperatureDouble));
+                    break;
+                // Other cases if needed
+            }
+        }
+    };
+    //----------------------Spreadsheets Functions and Methods--------------------//
+    private int getLastDataRowIndex(Sheet sheet) {
+        int lastRowNum = sheet.getLastRowNum();
+        for (int i = lastRowNum; i >= 0; i--) {
+            Row row = sheet.getRow(i);
+            if (row != null) {
+                Cell cell = row.getCell(1); // Checking column B (index 1)
+                if (cell != null && cell.getCellType() != CellType.BLANK) {
+                    return i;
+                }
+            }
+        }
+        return -1; // Sheet is empty
+    }
+    //----------writing--------------//
+
+    // Method to write data to Excel version 3.5
+    private void writeDataToExcel(String fileName) {
+        try {
+            File file = new File(getExternalFilesDir(null), fileName);
+            FileInputStream fileInputStream = new FileInputStream(file);
+            Workbook workbook = new HSSFWorkbook(fileInputStream);
+
+            // Assuming sheet 5 is used for Cooking Load data
+            Sheet sheet = workbook.getSheetAt(5);
+
+            // Find the last row with non-empty data in columns
+            int lastRowNum = getLastDataRowIndex(sheet);
+
+            // Get the current date and time
+            String dateTime = getCurrentDateTime();
+
+            // Create a new row after the last row with data
+            Row newRow = sheet.createRow(lastRowNum + 1);
+
+            // Retrieve values from EditText fields
+            String remainingGasStr = remainingGasInput.getText().toString();
+            String thresholdStr = mTempInputTextView.getText().toString();
+            String initialGasStr = biogasInput.getText().toString();
+
+            // Check if any of the EditText fields are empty
+            if (remainingGasStr.isEmpty() || thresholdStr.isEmpty() || initialGasStr.isEmpty()) {
+                Toast.makeText(this, "Please fill all the input fields", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            double remainingGas = Double.parseDouble(remainingGasStr);
+            double threshold = Double.parseDouble(thresholdStr);
+            double initialGas = Double.parseDouble(initialGasStr);
+
+            // Log the values to ensure they are correct
+            Log.d(TAG, "DateTime: " + dateTime);
+            Log.d(TAG, "Initial Gas: " + initialGas);
+            Log.d(TAG, "Threshold: " + threshold);
+            Log.d(TAG, "Remaining Gas: " + remainingGas);
+
+            // Update the cell values with the new inputs
+            newRow.createCell(0).setCellValue(dateTime); // Column A
+            newRow.createCell(1).setCellValue(initialGas); // Column B
+            newRow.createCell(2).setCellValue(threshold); // Column C
+            newRow.createCell(3).setCellValue(remainingGas); // Column D
+
+            // Save the workbook with the updated data to a temporary file
+            File tempFile = new File(getExternalFilesDir(null), "temp_" + System.currentTimeMillis() + ".xls");
+            FileOutputStream tempOutputStream = new FileOutputStream(tempFile);
+            workbook.write(tempOutputStream);
+            tempOutputStream.close();
+
+            // Close the workbook
+            workbook.close();
+
+            // Replace the original file with the temporary file
+            File originalFile = new File(getExternalFilesDir(null), fileName);
+            if (originalFile.exists()) {
+                originalFile.delete(); // Delete the original file
+            }
+            if (tempFile.renameTo(originalFile)) {
+                Toast.makeText(this, "Data saved to file", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "Error saving data to file", Toast.LENGTH_SHORT).show();
+            }
+
+        } catch (IOException | NumberFormatException e) {
+            Log.e(TAG, "Error writing to file: ", e);
+            Toast.makeText(this, "Error writing to file", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    // Method to get current date and time
+    private String getCurrentDateTime() {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault());
+        return sdf.format(new Date());
+    }
+
+
+}
